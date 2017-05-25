@@ -84,6 +84,15 @@ public class PngOptimizer extends PngProcessor {
 
 	/** */
 	public PngImage optimize(PngImage image, boolean removeGamma, Integer compressionLevel) throws IOException {
+		return optimize(image, removeGamma, compressionLevel, PngFilterType.ADAPTIVE);
+	}
+
+	/**
+	 * @param filterType By default, adaptive filtering is used, which tries a variety of filters in an effort to get a
+	 *                   maximally-compressed PNG.
+	 */
+	public PngImage optimize(PngImage image, boolean removeGamma, Integer compressionLevel, PngFilterType filterType) throws IOException {
+
 		// FIXME: support low bit depth interlaced images
 		if (image.getInterlace() == 1 && image.getSampleBitCount() < 8) {
 			return image;
@@ -107,38 +116,11 @@ public class PngOptimizer extends PngProcessor {
 		// TODO: use this for bit depth reduction
 //		Map<PngPixel, Integer> colors = getColors(image, originalScanlines, 32);
 
-		// apply each type of filtering
-		final Map<PngFilterType, List<byte[]>> filteredScanlines = new HashMap<>();
-		for (PngFilterType filterType : PngFilterType.standardValues()) {
-			log.debug("Applying filter: %s", filterType);
-			final List<byte[]> scanlines = copyScanlines(originalScanlines);
-			pngFilterHandler.applyFiltering(filterType, scanlines, image.getSampleBitCount());
-
-			filteredScanlines.put(filterType, scanlines);
-		}
-
-		// pick the filter that compresses best
-		PngFilterType bestFilterType = null;
-		byte[] deflatedImageData = null;
-		for (Entry<PngFilterType, List<byte[]>> entry : filteredScanlines.entrySet()) {
-			final byte[] imageResult = pngCompressionHandler.deflate(serialize(entry.getValue()), compressionLevel, true);
-			if (deflatedImageData == null || imageResult.length < deflatedImageData.length) {
-				deflatedImageData = imageResult;
-				bestFilterType = entry.getKey();
-			}
-		}
-
-		// see if adaptive filtering results in even better compression
-		final List<byte[]> scanlines = copyScanlines(originalScanlines);
-		pngFilterHandler.applyAdaptiveFiltering(inflatedImageData, scanlines, filteredScanlines, image.getSampleBitCount());
-
-		final byte[] adaptiveImageData = pngCompressionHandler.deflate(inflatedImageData, compressionLevel, true);
-		log.debug("Original=%d, Adaptive=%d, %s=%d", image.getImageData().length, adaptiveImageData.length,
-				bestFilterType, (deflatedImageData == null) ? 0 : deflatedImageData.length);
-
-		if (deflatedImageData == null || adaptiveImageData.length < deflatedImageData.length) {
-			deflatedImageData = adaptiveImageData;
-			bestFilterType = PngFilterType.ADAPTIVE;
+		byte[] deflatedImageData;
+		if (filterType==PngFilterType.ADAPTIVE) {
+			deflatedImageData = performAdaptiveFiltering(image, compressionLevel, inflatedImageData, originalScanlines);
+		} else {
+			deflatedImageData = performExplicitFiltering(image, compressionLevel, inflatedImageData, originalScanlines, filterType);
 		}
 
 		final PngChunk imageChunk = new PngChunk(PngChunk.IMAGE_DATA.getBytes(), deflatedImageData);
@@ -168,6 +150,66 @@ public class PngOptimizer extends PngProcessor {
 		return result;
 	}
 
+	/**
+	 * Perform the default compression logic, which applies various filters as well as adaptive filtering, and results
+	 * in the optimally compressed PNG.
+	 */
+	private byte[] performAdaptiveFiltering(PngImage image, Integer compressionLevel, PngByteArrayOutputStream inflatedImageData, List<byte[]> originalScanlines) throws IOException {
+		// apply each type of filtering
+		final Map<PngFilterType, List<byte[]>> filteredScanlines = new HashMap<>();
+		for (PngFilterType filterType : PngFilterType.standardValues()) {
+			log.debug("Applying filter: %s", filterType);
+			final List<byte[]> scanlines = copyScanlines(originalScanlines);
+			pngFilterHandler.applyFiltering(filterType, scanlines, image.getSampleBitCount());
+
+			filteredScanlines.put(filterType, scanlines);
+		}
+
+		// pick the filter that compresses best
+		PngFilterType bestFilterType = null;
+		byte[] deflatedImageData = null;
+		for (Entry<PngFilterType, List<byte[]>> entry : filteredScanlines.entrySet()) {
+			final byte[] imageResult = pngCompressionHandler.deflate(serialize(entry.getValue()), compressionLevel, true);
+			if (deflatedImageData == null || imageResult.length < deflatedImageData.length) {
+				deflatedImageData = imageResult;
+				bestFilterType = entry.getKey();
+			}
+		}
+
+		log.debug("Best filter: "+bestFilterType);
+
+		// see if adaptive filtering results in even better compression
+		final List<byte[]> scanlines = copyScanlines(originalScanlines);
+		pngFilterHandler.applyAdaptiveFiltering(inflatedImageData, scanlines, filteredScanlines, image.getSampleBitCount());
+
+		final byte[] adaptiveImageData = pngCompressionHandler.deflate(inflatedImageData, compressionLevel, true);
+		byte[] best;
+		if (deflatedImageData == null || adaptiveImageData.length < deflatedImageData.length) {
+			best = adaptiveImageData;
+			bestFilterType = PngFilterType.ADAPTIVE;
+		} else {
+			best = deflatedImageData;
+		}
+
+		log.debug("Original=%d, Adaptive=%d, %s=%d", image.getImageData().length, adaptiveImageData.length,
+				bestFilterType, (deflatedImageData == null) ? 0 : deflatedImageData.length);
+
+		return best;
+	}
+
+	/** Used when an explicit {@link PngFilterType} is specified */
+	private byte[] performExplicitFiltering(PngImage image, Integer compressionLevel, PngByteArrayOutputStream inflatedImageData, List<byte[]> originalScanlines, PngFilterType filterType) throws IOException {
+		log.debug("Applying explicitly specified filter: %s", filterType);
+		final List<byte[]> scanlines = copyScanlines(originalScanlines);
+		pngFilterHandler.applyFiltering(filterType, scanlines, image.getSampleBitCount());
+
+		final byte[] deflatedImageData = pngCompressionHandler.deflate(inflatedImageData, compressionLevel, true);
+
+		log.debug("Original=%d, %s=%d", image.getImageData().length,
+				false, (deflatedImageData == null) ? 0 : deflatedImageData.length);
+
+		return deflatedImageData;
+	}
 	/* */
 	private List<byte[]> copyScanlines(List<byte[]> original) {
 		final List<byte[]> copy = new ArrayList<>(original.size());
